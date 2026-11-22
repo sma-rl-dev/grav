@@ -1,0 +1,265 @@
+#grav-login {
+    max-width: 30rem;
+    margin: 5rem auto;
+    background: #fcfcfc;
+    border: 4px solid #eee;
+    border-radius: 4px;
+    padding: 1rem 3rem 3rem 3rem;
+    text-align: center;
+}
+
+#grav-login .form-actions {
+    text-align: right;
+}
+
+#grav-logout {
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+}
+
+.alert.info {
+    color: #27ae60;
+}
+
+.alert.error {
+    color: #e74c3c;
+}
+
+#grav-login p {
+    font-size: small;
+    margin: 1rem 0;
+    padding: 0;
+    text-align: center;
+}
+#grav-login .form-actions p {
+    margin-bottom: 0;
+}
+
+#grav-login .button {
+    vertical-align: middle;
+}
+
+#grav-login .delimiter {
+    display: block;
+    font-size: 1.6rem;
+    letter-spacing: 1px;
+    line-height: 1.6rem;
+    position: relative;
+    text-transform: uppercase;
+    margin: 1rem 0;
+}
+
+#grav-login .delimiter::after,
+#grav-login .delimiter::before {
+    background-color: #777777;
+    content: "";
+    height: 1px;
+    position: absolute;
+    top: 0.8rem;
+    width: 40%;
+}
+#grav-login .delimiter::before {
+    background-image: linear-gradient(to right, #777777, #ffffff);
+    left: 0;
+}
+#grav-login .delimiter::after {
+    background-image: linear-gradient(to left, #777777, #ffffff);
+    right: 0;
+}
+
+#grav-login .rememberme {
+    display: inline-block;
+    float: left;
+    padding: 7px 0;
+    vertical-align: middle;
+}
+
+#grav-login .rememberme label {
+    font-weight: inherit;
+    display: inline;
+}
+
+.login-status {
+    white-space: nowrap;
+    vertical-align: middle;
+}
+.email-change-pending .notice p {
+    margin: 0 0 0.5rem 0;
+}
+
+.email-change-actions .button {
+    margin: 0 0.5rem 0.5rem 0;
+}
+
+/* Passkeys */
+#grav-login .passkey-signin,
+#grav-login .passkey-second-step {
+    margin: 0 0 1rem 0;
+}
+#grav-login .passkey-button {
+    width: 100%;
+}
+#grav-login .passkey-or {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 1rem 0 0 0;
+    opacity: 0.65;
+    font-size: 0.875rem;
+}
+#grav-login .passkey-or::before,
+#grav-login .passkey-or::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid currentColor;
+    opacity: 0.35;
+}
+.passkeys-list {
+    list-style: none;
+    margin: 0.5rem 0 1rem 0;
+    padding: 0;
+}
+.passkeys-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.5rem 0;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+.passkeys-list li:first-child {
+    border-top: 0;
+}
+.passkeys-list .passkey-who small {
+    display: block;
+    opacity: 0.7;
+}
+.passkeys-list .passkey-actions {
+    white-space: nowrap;
+}
+.passkey-proof {
+    margin: 0 0 0.75rem 0;
+}
+.passkey-proof label {
+    display: block;
+}
+
+/* 2-Factor Authentication panel on the profile page. Colours come from the
+   theme's text colour, so it sits on light and dark themes alike. */
+.twofa-panel {
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.05);
+    padding: 1rem;
+}
+.twofa-panel [hidden] {
+    display: none !important;
+}
+.twofa-panel .twofa-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+.twofa-panel .twofa-head-text {
+    flex: 1;
+    min-width: 0;
+}
+.twofa-panel .twofa-title {
+    margin: 0;
+    font-weight: 600;
+}
+.twofa-panel .twofa-text {
+    margin: 0.15rem 0 0 0;
+    font-size: 0.875em;
+    opacity: 0.75;
+}
+.twofa-panel .twofa-icon {
+    flex: none;
+    width: 1.25rem;
+    height: 1.25rem;
+    margin-top: 0.1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.twofa-panel .twofa-icon-off { opacity: 0.6; }
+.twofa-panel .twofa-icon-finish { color: #f59e0b; }
+.twofa-panel .twofa-icon-on { color: #22c55e; }
+.twofa-panel .twofa-head-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.twofa-panel .twofa-qr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+.twofa-panel .twofa-qr-image {
+    width: 168px;
+    height: 168px;
+    padding: 8px;
+    border-radius: 8px;
+    background: #fff;
+}
+.twofa-panel .twofa-secret-box {
+    flex: 1;
+    min-width: 12rem;
+}
+.twofa-panel .twofa-label {
+    display: block;
+    margin: 0 0 0.35rem 0;
+    font-size: 0.875em;
+    font-weight: 500;
+}
+.twofa-panel .twofa-secret-code {
+    display: block;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: rgba(127, 127, 127, 0.12);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    overflow-wrap: anywhere;
+}
+.twofa-panel .twofa-confirm {
+    margin-top: 1rem;
+}
+.twofa-panel .twofa-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+.twofa-panel .twofa-row .twofa-code-wrapper {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+}
+.twofa-panel .twofa-row .twofa-code {
+    width: 100%;
+    box-sizing: border-box;
+    text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.3em;
+}
+.twofa-panel .twofa-row .button {
+    flex: none;
+    white-space: nowrap;
+}
+.twofa-panel .twofa-error,
+.twofa-panel .twofa-notice {
+    margin: 0.75rem 0 0 0;
+}
+.twofa-panel .twofa-notice {
+    color: #22c55e;
+}
+@media (max-width: 480px) {
+    .twofa-panel .twofa-head { flex-wrap: wrap; }
+    .twofa-panel .twofa-row { flex-wrap: wrap; }
+    .twofa-panel .twofa-row .twofa-code-wrapper { flex-basis: 100%; }
+}

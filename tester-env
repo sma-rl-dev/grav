@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+# tester-env CLI for Grav 2.2.32
+# (fff1198f33c84acecdcd6f52dad32eaa96fce60c, latest stable release).
+#
+# Runs the editable Grav checkout in one Docker container: Apache + mod_php 8.3,
+# composer vendor tree installed from the committed composer.lock, and the Grav
+# 2.x admin panel as plugins pinned in the build context (admin2 2.2.16, api
+# 1.1.23, login 3.13.5, form 9.2.2, email 5.3.5, shortcode-core 6.2.9,
+# flex-objects 1.4.18, error 2.0.5, problems 3.0.2, theme quark2 1.1.25).
+#
+# Ports/state:
+#   host port ${PORT:-53821} -> container 80
+#   No volumes. Grav content is flat files under user/ and every regenerable
+#   cache lives in cache/tmp/images/assets/logs inside the container, so the
+#   container's writable layer is the whole state and `reset` (remove the
+#   container, keep the image) is the clean slate.
+#
+# Deterministic credentials: admin / GravAdmin2026. The super-admin account is
+# baked into the image as user/accounts/admin.yaml with a fixed bcrypt hash, so
+# the admin2 first-run setup wizard never appears and the password satisfies the
+# default system.pwd_regex ((?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,}). Seed adds a
+# second, limited account: june.park / JunePark2026 (content editor: API pages
+# and media read/write, no users/config/system).
+#
+# Seeded product state (tester-env-content): the Hawthorn Works garden-furniture
+# site, fifteen pages in a two-level tree with numeric ordering, two drafts, one
+# published page hidden from navigation, a dated/tagged journal with page media,
+# and the site title/description config. Seed replaces user/pages outright, so
+# stale pages from an earlier fixture cannot survive.
+#
+# Network isolation: the container is started with --add-host entries that map
+# getgrav.org / grav.org / getgrav.com to loopback, so the panel's GPM update
+# checks, notification feed and news feed cannot reach the network. They fail
+# fast locally instead of hanging or leaking state between runs.
+#
+# All commands accept --run-id <id> and --port <port> because scripts/rl-env
+# invokes them that way. RUN_ID scopes containers only; IMAGE_TAG scopes the
+# image (content-addressed by rl-env, never run-id based).
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+RUN_ID="${RUN_ID:-default}"
+PORT="${PORT:-53821}"
+IMAGE_NAME="${IMAGE_TAG:-tester-env-grav:dev}"
+DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
+SEED_ROOT="${SCRIPT_DIR}/tester-env-content"
+CONTENT_DIR="${SEED_ROOT}/pages"
+ACCOUNTS_DIR="${SEED_ROOT}/accounts"
+CONFIG_DIR="${SEED_ROOT}/config"
+
+CONTAINER_PORT=80
+
+ADMIN_USER="admin"
+ADMIN_PASS="GravAdmin2026"
+EDITOR_USER="june.park"
+EDITOR_PASS="JunePark2026"
+ADMIN_PATH="/admin"
+API_BASE="/api/v1"
+
+# Seeded site (tester-env-content/pages): "route|visible marker text" pairs,
+# checked against the rendered front end. Numeric folder prefixes give the
+# ordering shown in admin2; /services/restoration is published but visible:false,
+# so it is routable and absent from the navigation.
+SEEDED_PAGES=(
+  "/|nine-person studio"
+  "/studio|old rope factory"
+  "/studio/about|shared workshop"
+  "/studio/team|Mira Holt"
+  "/services|small number of commissions"
+  "/services/benches|full-scale drawing"
+  "/services/tables|slatted top"
+  "/services/restoration|weathered garden furniture"
+  "/contact|4120 SE Hawthorne Boulevard"
+)
+JOURNAL_PAGES=(
+  "/journal|Notes from the workshop"
+  "/journal/workshop-open-day|wet Saturday in June"
+  "/journal/bench-for-a-small-garden|narrow courtyard in Sellwood"
+  "/journal/wet-season-joinery|draw-bored mortise and tenon"
+)
+DRAFT_ROUTES=("/studio/careers" "/services/commissions")
+MEDIA_ROUTE="/journal/bench-for-a-small-garden"
+MEDIA_FILE="bench-in-oak.jpg"
+
+SUFFIX=""
+CONTAINER_NAME=""
+
+refresh_names() {
+  SUFFIX=""
+  [ "${RUN_ID}" != "default" ] && SUFFIX="-${RUN_ID}"
+  CONTAINER_NAME="tester-env-grav${SUFFIX}"
+  LOCAL_URL="http://127.0.0.1:${PORT}"
+  LABELS=(
+    --label "tester-env.project=${TESTER_ENV_PROJECT:-tester-env}"
+    --label "tester-env.app=grav"
+    --label "tester-env.scenario=${TESTER_ENV_SCENARIO:-manual}"
+    --label "tester-env.run_id=${TESTER_ENV_RUN_ID:-${RUN_ID}}"
+  )
+}
+
+log() { printf '==> %s\n' "$*"; }
+die() { printf '==> ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker is required"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+}
+
+container_exists() {
+  docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"
+}
+
+container_running() {
+  docker ps --filter "name=^/${CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"
+}
+
+require_running() {
+  container_running || die "container ${CONTAINER_NAME} is not running; run './tester-env deploy' first"
+}
+
+body() { curl -sS --max-time 15 "$@" 2>/dev/null || true; }
+
+# Case-based substring test: avoids the pipefail/SIGPIPE trap of `printf | grep -q`.
+contains() {
+  case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac
+}
+
+http_code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$@" 2>/dev/null || true; }
+
+admin_shell_ready() {
+  contains "$(body "${LOCAL_URL}${ADMIN_PATH}")" 'apiPrefix'
+}
+
+wait_for_app() {
+  local deadline=$((SECONDS + 120))
+  log "waiting for Grav on ${LOCAL_URL}"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    if admin_shell_ready; then
+      log "admin panel shell is served on ${LOCAL_URL}${ADMIN_PATH}"
+      return 0
+    fi
+    if ! container_running; then
+      docker logs --tail 60 "${CONTAINER_NAME}" 2>&1 || true
+      die "container ${CONTAINER_NAME} exited before it answered"
+    fi
+    sleep 1
+  done
+  docker logs --tail 80 "${CONTAINER_NAME}" 2>&1 || true
+  die "server did not answer within 120s"
+}
+
+# POSTs credentials to the api plugin and prints the bearer token.
+api_token() {
+  local user="${1:-${ADMIN_USER}}" pass="${2:-${ADMIN_PASS}}"
+  local response token
+  response=$(body -X POST -H 'Content-Type: application/json' \
+    --data "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
+    "${LOCAL_URL}${API_BASE}/auth/token")
+  token=$(printf '%s' "${response}" \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+  [ -n "${token}" ] || die "API login as ${user} failed: ${response}"
+  printf '%s' "${token}"
+}
+
+setup_required() {
+  local response
+  response=$(body "${LOCAL_URL}${API_BASE}/auth/setup")
+  contains "${response}" '"setup_required":false' && return 1
+  contains "${response}" '"setup_required":true' && return 0
+  die "unexpected setup status response: ${response}"
+}
+
+# Grav caches parsed pages; replace the fixture tree, copy the seeded account
+# and site config, hand everything to www-data, then clear Grav's cache through
+# its own CLI (no prompts with -n). Wiping user/pages first makes the result
+# independent of the image's demo pages and of any earlier fixture.
+write_content() {
+  [ -d "${CONTENT_DIR}" ] || die "missing fixture tree ${CONTENT_DIR}"
+  log "replacing user/pages with the seeded site tree"
+  docker exec -u root "${CONTAINER_NAME}" sh -c \
+    'rm -rf /var/www/html/user/pages && mkdir -p /var/www/html/user/pages'
+  docker cp "${CONTENT_DIR}/." "${CONTAINER_NAME}:/var/www/html/user/pages/"
+
+  [ -d "${ACCOUNTS_DIR}" ] || die "missing account fixtures ${ACCOUNTS_DIR}"
+  log "copying seeded accounts into user/accounts"
+  docker cp "${ACCOUNTS_DIR}/." "${CONTAINER_NAME}:/var/www/html/user/accounts/"
+
+  [ -d "${CONFIG_DIR}" ] || die "missing config fixtures ${CONFIG_DIR}"
+  log "copying seeded site config into user/config"
+  docker cp "${CONFIG_DIR}/." "${CONTAINER_NAME}:/var/www/html/user/config/"
+
+  docker exec -u root "${CONTAINER_NAME}" chown -R www-data:www-data \
+    /var/www/html/user/pages /var/www/html/user/accounts /var/www/html/user/config
+  docker exec -u www-data -w /var/www/html "${CONTAINER_NAME}" php bin/grav cache -n >/dev/null
+}
+
+cmd_deploy() {
+  need_docker
+  log "building image ${IMAGE_NAME} from ${DOCKERFILE}"
+  # No run-scoped labels on the image: IMAGE_TAG is content-addressed and must
+  # yield the same image ID for identical source across parallel runs.
+  docker build -t "${IMAGE_NAME}" -f "${DOCKERFILE}" "${SCRIPT_DIR}"
+
+  if container_exists; then
+    log "replacing existing container ${CONTAINER_NAME}"
+    docker stop --time 10 "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" >/dev/null
+  fi
+
+  log "starting ${CONTAINER_NAME} on port ${PORT}"
+  docker run -d --name "${CONTAINER_NAME}" "${LABELS[@]}" \
+    --add-host getgrav.org:127.0.0.1 \
+    --add-host grav.org:127.0.0.1 \
+    --add-host getgrav.com:127.0.0.1 \
+    -e TZ=UTC \
+    -p "${PORT}:${CONTAINER_PORT}" \
+    "${IMAGE_NAME}" >/dev/null
+
+  wait_for_app
+
+  if setup_required; then
+    die "admin2 still reports setup_required: the seeded account was not loaded"
+  fi
+  log "setup wizard bypassed: seeded super-admin account is active"
+
+  api_token >/dev/null
+  log "API login verified as ${ADMIN_USER}"
+
+  log "deployment complete: ${LOCAL_URL}${ADMIN_PATH} (site: ${LOCAL_URL}/)"
+  log "login: ${ADMIN_USER}/${ADMIN_PASS}"
+  log "next: ./tester-env seed, then ./tester-env verify"
+}
+
+cmd_seed() {
+  need_docker
+  require_running
+  write_content
+  log "seed complete: 15 pages (13 published, 2 drafts, 1 hidden from navigation), 3 dated journal posts with media, the ${EDITOR_USER} account and the site config"
+  log "next: ./tester-env verify"
+}
+
+cmd_verify() {
+  need_docker
+  require_running
+  local token editor_token payload route entry marker
+
+  log "checking the admin SPA shell on ${ADMIN_PATH}"
+  [ "$(http_code "${LOCAL_URL}${ADMIN_PATH}")" = "200" ] \
+    || die "${ADMIN_PATH} did not return 200"
+  admin_shell_ready || die "${ADMIN_PATH} did not serve the admin2 SPA shell"
+
+  setup_required && die "setup wizard is still required (no account loaded)"
+  log "setup_required = false"
+
+  log "checking API login as ${ADMIN_USER}"
+  token=$(api_token)
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/me")
+  contains "${payload}" '"super_admin":true' \
+    || die "API profile does not report super_admin for ${ADMIN_USER}"
+  contains "${payload}" "\"username\":\"${ADMIN_USER}\"" \
+    || die "API profile does not report username ${ADMIN_USER}"
+  log "API profile: ${ADMIN_USER} is a super admin"
+
+  log "checking the front end renders the seeded site"
+  contains "$(body "${LOCAL_URL}/")" 'Garden furniture designed and built in Portland' \
+    || die "the seeded site description is not on the front page"
+  for entry in "${SEEDED_PAGES[@]}" "${JOURNAL_PAGES[@]}"; do
+    route="${entry%%|*}"
+    marker="${entry#*|}"
+    payload=$(body "${LOCAL_URL}${route}")
+    [ "$(http_code "${LOCAL_URL}${route}")" = "200" ] \
+      || die "front-end route ${route} did not return 200"
+    contains "${payload}" "${marker}" \
+      || die "front-end route ${route} does not render: ${marker}"
+  done
+  log "front end renders ${#SEEDED_PAGES[@]} site pages and ${#JOURNAL_PAGES[@]} journal pages"
+
+  log "checking the seeded journal listing, dates and tags"
+  payload=$(body "${LOCAL_URL}/journal")
+  contains "${payload}" 'A narrow courtyard in Sellwood' \
+    || die "/journal does not list the seeded post summaries"
+  contains "${payload}" 'datetime="2026-06-05T09:00:00+00:00"' \
+    || die "/journal does not list the seeded post dates"
+  first_card=$(printf '%s' "${payload}" \
+    | grep -o 'class="p-name"><a href="[^"]*"' | head -1)
+  contains "${first_card}" '/journal/wet-season-joinery' \
+    || die "/journal listing is not ordered by date, newest first"
+  contains "${payload}" 'bench-in-oak.jpg' \
+    || die "/journal listing does not render the seeded post image"
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages/journal")
+  contains "${payload}" '"template":"blog"' \
+    || die "/journal is not using the blog template"
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages/journal/wet-season-joinery")
+  contains "${payload}" '"taxonomy":{"tag":["Joinery","Materials"]}' \
+    || die "journal post taxonomy tags are missing"
+  contains "${payload}" '"date":"2026-10-02T09:00:00+00:00"' \
+    || die "journal post date is not the seeded date"
+  contains "$(body "${LOCAL_URL}/journal/bench-for-a-small-garden")" 'Materials' \
+    || die "journal tag labels do not render on a post page"
+  log "journal page uses the blog template; posts carry fixed dates and tags"
+
+  log "checking ordering, page state and media through the API"
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages?limit=100")
+  contains "${payload}" '"total":15' \
+    || die "the API page list does not report the 15 seeded pages"
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages/services")
+  contains "${payload}" '"folder":"03.services"' \
+    || die "/services does not carry the seeded ordering prefix"
+  contains "${payload}" '"order":"03."' \
+    || die "/services API order does not match the seeded folder prefix"
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages/services/restoration")
+  contains "${payload}" '"published":true' \
+    || die "/services/restoration should be published and hidden, not a draft"
+  contains "${payload}" '"visible":false' \
+    || die "/services/restoration should be hidden from navigation"
+  contains "${payload}" '"routable":true' \
+    || die "/services/restoration should still be routable"
+  for route in "${DRAFT_ROUTES[@]}"; do
+    payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages${route}")
+    contains "${payload}" "\"route\":\"${route}\"" \
+      || die "draft page ${route} is missing from the API"
+    contains "${payload}" '"published":false' \
+      || die "draft page ${route} is reported as published"
+    contains "${payload}" '"routable":false' \
+      || die "draft page ${route} is reported as routable"
+  done
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/pages${MEDIA_ROUTE}/media")
+  contains "${payload}" "\"filename\":\"${MEDIA_FILE}\"" \
+    || die "seeded page media ${MEDIA_FILE} is missing from ${MEDIA_ROUTE}"
+  log "folder ordering, the hidden page, both drafts and the page media are seeded"
+
+  log "checking the seeded accounts through the API"
+  payload=$(body -H "Authorization: Bearer ${token}" "${LOCAL_URL}${API_BASE}/users?per_page=50")
+  contains "${payload}" "\"username\":\"${EDITOR_USER}\"" \
+    || die "seeded account ${EDITOR_USER} is missing"
+  contains "${payload}" '"fullname":"June Park"' \
+    || die "seeded account ${EDITOR_USER} has the wrong fullname"
+  contains "${payload}" '"title":"Content Editor"' \
+    || die "seeded account ${EDITOR_USER} has the wrong title"
+
+  log "checking the limited ${EDITOR_USER} account"
+  editor_token=$(api_token "${EDITOR_USER}" "${EDITOR_PASS}")
+  payload=$(body -H "Authorization: Bearer ${editor_token}" "${LOCAL_URL}${API_BASE}/me")
+  contains "${payload}" '"super_admin":false' \
+    || die "${EDITOR_USER} is a super admin"
+  contains "${payload}" "\"username\":\"${EDITOR_USER}\"" \
+    || die "API profile does not report ${EDITOR_USER}"
+  contains "${payload}" '"api.pages.read":true' \
+    || die "${EDITOR_USER} cannot read pages"
+  contains "${payload}" '"api.pages.write":true' \
+    || die "${EDITOR_USER} cannot write pages"
+  contains "${payload}" '"api.users.read":false' \
+    || die "${EDITOR_USER} can read users"
+  contains "${payload}" '"api.config.read":false' \
+    || die "${EDITOR_USER} can read configuration"
+  [ "$(http_code -H "Authorization: Bearer ${editor_token}" "${LOCAL_URL}${API_BASE}/pages?limit=5")" = "200" ] \
+    || die "${EDITOR_USER} cannot list pages through the API"
+  payload=$(body -H "Authorization: Bearer ${editor_token}" "${LOCAL_URL}${API_BASE}/users")
+  contains "${payload}" '"total":1' \
+    || die "${EDITOR_USER} sees more than their own account row"
+  if contains "${payload}" "\"username\":\"${ADMIN_USER}\""; then
+    die "${EDITOR_USER} can see the ${ADMIN_USER} account"
+  fi
+  [ "$(http_code -H "Authorization: Bearer ${editor_token}" "${LOCAL_URL}${API_BASE}/config")" = "403" ] \
+    || die "${EDITOR_USER} can read the configuration API"
+  log "${EDITOR_USER} is a limited content editor: pages only, no users or config"
+
+  log "checking the draft and hidden-page boundaries on the front end"
+  payload=$(body "${LOCAL_URL}/services")
+  contains "${payload}" 'Garden Tables' \
+    || die "the visible /services child is missing from the navigation"
+  if contains "${payload}" 'Restoration'; then
+    die "the hidden page /services/restoration appears in the navigation"
+  fi
+  for route in "${DRAFT_ROUTES[@]}"; do
+    [ "$(http_code "${LOCAL_URL}${route}")" = "404" ] \
+      || die "draft page ${route} is reachable on the front end"
+  done
+  log "hidden page is out of the navigation and both drafts return 404"
+
+  log "verify passed: admin SPA, seeded credentials, 15-page site (2 drafts, 1 hidden), journal dates/tags/media and the limited account"
+}
+
+cmd_reset() {
+  need_docker
+  log "resetting environment"
+  if container_exists; then
+    docker stop --time 10 "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" >/dev/null
+  fi
+  log "reset complete (container removed; image kept for reuse)"
+}
+
+cmd_stop() {
+  need_docker
+  if container_running; then
+    docker stop --time 10 "${CONTAINER_NAME}" >/dev/null
+    log "stopped ${CONTAINER_NAME} (state preserved in the container filesystem)"
+  else
+    log "container ${CONTAINER_NAME} is not running"
+  fi
+}
+
+cmd_logs() {
+  need_docker
+  local tail_lines="${TAIL:-200}"
+  local follow=""
+  for arg in "$@"; do
+    case "${arg}" in
+      --follow|-f) follow="-f" ;;
+      *) tail_lines="${arg}" ;;
+    esac
+  done
+  docker logs --tail "${tail_lines}" ${follow} "${CONTAINER_NAME}" 2>&1 || die "no logs for ${CONTAINER_NAME}"
+}
+
+cmd_status() {
+  echo "App: Grav 2.2.32"
+  echo "Image: ${IMAGE_NAME}"
+  echo "Port: ${PORT} (container ${CONTAINER_PORT})"
+  echo "URL: ${LOCAL_URL}${ADMIN_PATH} (site: ${LOCAL_URL}/)"
+  echo "Container: ${CONTAINER_NAME}"
+  echo "Volumes: none (state lives in the container filesystem)"
+  if container_running; then
+    echo "Status: RUNNING"
+    echo "Credentials: ${ADMIN_USER}/${ADMIN_PASS} (super admin); ${EDITOR_USER}/${EDITOR_PASS} (content editor, after seed)"
+  elif container_exists; then
+    echo "Status: STOPPED"
+  else
+    echo "Status: NOT RUNNING"
+  fi
+}
+
+cmd_help() {
+  cat <<EOF
+Grav - Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build the source image (core + pinned admin plugin chain), start the
+            container and prove the seeded super-admin login
+            (${ADMIN_USER}/${ADMIN_PASS}); setup wizard is bypassed
+  seed      Replace user/pages with the deterministic Hawthorn Works site (15
+            pages, 2 drafts, 1 hidden page, dated/tagged journal, page media),
+            copy the june.park content-editor account and the site config, then
+            clear Grav's caches; safe to re-run
+  verify    Assert the admin2 SPA shell, both seeded logins, the rendered site,
+            page states/ordering/taxonomy/dates/media through the API, and the
+            draft, hidden-page and limited-account boundaries
+  reset     Stop and remove the container (state is its writable layer); the
+            image is kept for reuse
+  stop      Stop the container (state preserved); 'down' is an alias
+  logs      Show container logs (TAIL=<n>, --follow)
+  status    Show container/image/URL/credential state
+  help      Show this help
+
+Options:
+  --run-id <id>   Scope the container name for parallel runs. Default: default
+  --port <port>   Host port bound to container ${CONTAINER_PORT}. Default: ${PORT}
+
+Environment:
+  IMAGE_TAG       Content-addressed image tag exported by scripts/rl-env
+                  (default: tester-env-grav:dev)
+  RUN_ID          Run id; scopes the container, never the image name
+  PORT            Host port (same as --port)
+
+Notes:
+  - No database and no volumes: content is flat Markdown/YAML under user/ and
+    caches live in the container filesystem, so 'reset' is a plain container
+    removal and 'deploy' recreates the pristine image state.
+  - The super-admin is baked in as user/accounts/admin.yaml with a fixed bcrypt
+    hash. The password satisfies the default system.pwd_regex
+    ((?=.*\\d)(?=.*[a-z])(?=.*[A-Z]).{8,}). Seed adds the limited content
+    editor ${EDITOR_USER}/${EDITOR_PASS} (API pages and media only).
+  - GPM/update/notification traffic is blocked by mapping getgrav.org, grav.org
+    and getgrav.com to loopback with --add-host, so the panel never reaches the
+    network.
+  - Admin panel: http://localhost:\${PORT}/admin ; front end: http://localhost:\${PORT}/
+    Grav builds links from the request host, so no base-URL variable is needed.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  local passthrough=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run-id)
+        [ $# -ge 2 ] || die "--run-id requires a value"
+        RUN_ID="$2"
+        shift 2
+        ;;
+      --port)
+        [ $# -ge 2 ] || die "--port requires a value"
+        PORT="$2"
+        shift 2
+        ;;
+      --help|-h)
+        cmd_help
+        exit 0
+        ;;
+      *)
+        passthrough+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  refresh_names
+
+  case "${cmd}" in
+    deploy) cmd_deploy ;;
+    seed) cmd_seed ;;
+    verify) cmd_verify ;;
+    reset) cmd_reset ;;
+    stop|down) cmd_stop ;;
+    logs) cmd_logs "${passthrough[@]+"${passthrough[@]}"}" ;;
+    status) cmd_status ;;
+    help|--help|-h) cmd_help ;;
+    *)
+      printf '==> ERROR: unknown command %s\n' "${cmd}" >&2
+      cmd_help
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

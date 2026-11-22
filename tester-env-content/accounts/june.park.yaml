@@ -1,0 +1,21 @@
+state: enabled
+email: 'june.park@hawthornworks.example'
+fullname: 'June Park'
+title: 'Content Editor'
+language: en
+access:
+  site:
+    login: true
+  admin:
+    login: true
+  api:
+    access: true
+    pages:
+      read: true
+      write: true
+    media:
+      read: true
+      write: true
+hashed_password: '$2y$10$prqaYI5n3eAh5Paxu5vK.e76rDtA9yjpVl/H3HDp8qAPLswfDu7jC'
+created: 1767225600
+modified: 1767225600

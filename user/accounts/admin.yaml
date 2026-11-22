@@ -1,0 +1,13 @@
+state: enabled
+email: admin@example.com
+fullname: Site Administrator
+title: Administrator
+language: en
+access:
+  site:
+    login: true
+  api:
+    super: true
+hashed_password: '$2y$10$zcbR91FHBR71KeXfBwT2zujx/HLdTto9a//NhOQ1vTgcVLI4dXgje'
+created: 1735689600
+modified: 1735689600

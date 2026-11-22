@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "app": "grav",
+  "requirements": {
+    "admin-login": {
+      "status": "present",
+      "evidence": "Deploy bakes user/accounts/admin.yaml with a fixed bcrypt hash; `tester-env deploy` and `verify` both log in through POST /api/v1/auth/token and read /api/v1/me (super_admin true, username admin)."
+    },
+    "nested-page-tree": {
+      "status": "present",
+      "evidence": "Seed installs 15 pages in a two-level tree: /home, /studio(+about,team,careers), /services(+benches,tables,restoration,commissions), /journal(+3 posts), /contact. Numeric folder prefixes order top level 01..05 and children 01..04; GET /api/v1/pages reports total 15 with folder/order per page."
+    },
+    "draft-pages": {
+      "status": "present",
+      "evidence": "/studio/careers and /services/commissions carry `published: false`. The API reports published false, routable false; verify also asserts both front-end routes return 404."
+    },
+    "hidden-page": {
+      "status": "present",
+      "evidence": "/services/restoration is published but `visible: false`, so the API reports published true / visible false / routable true, the page renders at /services/restoration, and its title is absent from the site navigation while the visible sibling Garden Tables is present."
+    },
+    "journal-posts": {
+      "status": "present",
+      "evidence": "/journal uses the quark2 blog template with `content.items: '@self.children'` and date-desc ordering. Posts: Workshop Open Day (2026-06-05), A Bench for a Small Garden (2026-08-14), Joinery for the Wet Season (2026-10-02); the listing renders the summaries, dates and images, newest first."
+    },
+    "taxonomy-tags": {
+      "status": "present",
+      "evidence": "Journal posts carry tag taxonomies: [Workshop, Events], [Benches, Materials], [Joinery, Materials]. GET /api/v1/pages/journal/wet-season-joinery reports taxonomy tag [Joinery, Materials] and the post page renders the tag labels."
+    },
+    "page-media": {
+      "status": "present",
+      "evidence": "/journal/bench-for-a-small-garden holds bench-in-oak.jpg (800x420 JPEG, fixed committed file) plus a .meta.yaml alt/title; GET /api/v1/pages/journal/bench-for-a-small-garden/media lists it and the journal listing renders it as the post image."
+    },
+    "site-settings": {
+      "status": "present",
+      "evidence": "Seed copies user/config/site.yaml with title 'Hawthorn Works', author email hello@hawthornworks.example and the description 'Garden furniture designed and built in Portland, Oregon.', rendered in the front-end head/body."
+    },
+    "limited-editor-account": {
+      "status": "present",
+      "evidence": "Seed copies user/accounts/june.park.yaml (June Park, Content Editor, password JunePark2026, fixed bcrypt hash) with access api.access + api.pages read/write + api.media read/write and no users/config/system. verify logs in as june.park and asserts super_admin false, pages list 200, /users self-only total 1 without admin, and /config 403."
+    },
+    "idempotent-seed": {
+      "status": "present",
+      "evidence": "`tester-env seed` wipes user/pages then copies tester-env-content/pages, overwrites the seeded account and site.yaml, chowns to www-data and runs `php bin/grav cache -n`. A second seed without reset reproduces the same 15 pages, 2 accounts and media row."
+    },
+    "deterministic-reset": {
+      "status": "present",
+      "evidence": "`reset` removes only tester-env-grav; `deploy` recreates the pristine image state. Two full reset -> deploy -> seed -> verify cycles produced byte-identical jq snapshots of page states/ordering/taxonomy/dates, users and media (diff empty)."
+    }
+  }
+}
